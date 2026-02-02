@@ -1,4 +1,4 @@
-// Particle Fire Screen class - source
+﻿// Particle Fire Screen class - source
 
 // This file is part of Particle Fire.
 // 
@@ -33,6 +33,16 @@
 // External functions
 extern float frand(float range);
 extern void error_print (char *buff);
+
+//logger
+static void PF_LogFmtW(const wchar_t* fmt, ...)
+{
+	wchar_t buf[512];
+	va_list ap; va_start(ap, fmt);
+	_vsnwprintf_s(buf, _TRUNCATE, fmt, ap);
+	va_end(ap);
+	OutputDebugStringW(buf);
+}
 
 
 ParticleScreen::ParticleScreen ()
@@ -163,6 +173,16 @@ void ParticleScreen::InitScreen (HWND hwnd)
 	// Load text
 	this->LoadText ();
 	LastQuotePrintTime = NULL;
+
+	PF_LogFmtW(L"PF: SM_VIRTUAL x=%d y=%d w=%d h=%d\n",
+		GetSystemMetrics(SM_XVIRTUALSCREEN),
+		GetSystemMetrics(SM_YVIRTUALSCREEN),
+		GetSystemMetrics(SM_CXVIRTUALSCREEN),
+		GetSystemMetrics(SM_CYVIRTUALSCREEN));
+
+	RefreshMonitorRects();
+
+	BuildVisibleSpans();
 }
 
 void ParticleScreen::Draw ()
@@ -409,12 +429,60 @@ void ParticleScreen::Draw ()
 	}
 	//Blit backbuffer to window or to primary surface as needed.
 	tmr.Start();
-	dib.Lock();
 
-	//always start in upper left
-	dib.Blit(0, 0, 0, 0, dib.Width(), dib.Height());
-	
+	//original
+	//dib.Lock();
+
+	//RECT wnd; GetWindowRect(m_hWnd, &wnd);
+	//PF_LogFmtW(L"PF: wnd=(%ld,%ld)-(%ld,%ld) W=%ld H=%ld, DIB=%dx%d\n",
+	//	wnd.left, wnd.top, wnd.right, wnd.bottom,
+	//	wnd.right - wnd.left, wnd.bottom - wnd.top,
+	//	dib.Width(), dib.Height());
+
+	////always start in upper left
+	//dib.Blit(0, 0, 0, 0, dib.Width(), dib.Height());
+	//
+	//dib.Unlock();
+
+	////new
+	RECT wnd; GetWindowRect(m_hWnd, &wnd);
+
+	PF_LogFmtW(L"PF: wnd=(%ld,%ld)-(%ld,%ld) W=%ld H=%ld, DIB=%dx%d\n",
+		wnd.left, wnd.top, wnd.right, wnd.bottom,
+		wnd.right - wnd.left, wnd.bottom - wnd.top,
+		dib.Width(), dib.Height());
+
+
+	dib.Lock();
+	for (const RECT& mon : m_monRects) {
+		RECT is;  // intersection with this window (normally equal for the saver)
+		is.left = max(mon.left, wnd.left);
+		is.top = max(mon.top, wnd.top);
+		is.right = min(mon.right, wnd.right);
+		is.bottom = min(mon.bottom, wnd.bottom);
+		if (is.right <= is.left || is.bottom <= is.top) continue;
+
+		const int w = is.right - is.left;
+		const int h = is.bottom - is.top;
+
+		// Source in the DIB is window-local:
+		const int srcX = is.left - wnd.left;
+		const int srcY = is.top - wnd.top;
+
+		// Destination in working DC is same top-left (your Blit copies working->dest afterward)
+		const int dstX = srcX;
+		const int dstY = srcY;
+
+		PF_LogFmtW(L"PF: blit mon=(%ld,%ld)-(%ld,%ld) → is=(%ld,%ld)-(%ld,%ld) "
+			L"src=(%d,%d) dst=(%d,%d) w=%d h=%d\n",
+			mon.left, mon.top, mon.right, mon.bottom,
+			is.left, is.top, is.right, is.bottom,
+			srcX, srcY, dstX, dstY, w, h);
+
+		dib.Blit(dstX, dstY, srcX, srcY, w, h);
+	}
 	dib.Unlock();
+
 	BlitTimes += tmr.Check(10000);
 
 }
@@ -1117,4 +1185,75 @@ void ParticleScreen::SeedWall ()
 	} // End, If the Fire isnt Disabled
 }
 
+static BOOL CALLBACK EnumMonProc(HMONITOR, HDC, LPRECT prc, LPARAM lp) {
+	auto* v = reinterpret_cast<std::vector<RECT>*>(lp);
+	v->push_back(*prc);
 
+	PF_LogFmtW(L"PF: EnumMon rc=(%ld,%ld)-(%ld,%ld) w=%ld h=%ld\n",
+		prc->left, prc->top, prc->right, prc->bottom,
+		prc->right - prc->left, prc->bottom - prc->top);
+
+	return TRUE;
+}
+
+void ParticleScreen::RefreshMonitorRects() {
+	m_monRects.clear();
+	EnumDisplayMonitors(nullptr, nullptr, EnumMonProc, reinterpret_cast<LPARAM>(&m_monRects));
+
+	PF_LogFmtW(L"PF: monitors=%u\n", (unsigned)m_monRects.size());
+}
+
+static inline void pf_merge_spans(std::vector<ParticleScreen::PF_Span>& v) {
+	if (v.empty()) return;
+	std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.x0 < b.x0; });
+	size_t w = 0;
+	for (size_t i = 1; i < v.size(); ++i) {
+		if (v[w].x1 >= v[i].x0) { v[w].x1 = std::max(v[w].x1, v[i].x1); }
+		else { v[++w] = v[i]; }
+	}
+	v.resize(w + 1);
+}
+
+void ParticleScreen::BuildVisibleSpans() {
+	m_spans.clear();
+	m_spans.resize(HEIGHT);
+
+	// Window rect in virtual coords
+	RECT wnd{}; GetWindowRect(m_hWnd, &wnd);
+
+	const int W = WIDTH, H = HEIGHT;
+
+	for (const RECT& mon : m_monRects) {
+		// Intersect monitor with window (virtual coords) in LONG to match RECT
+		const LONG ix0 = (std::max)(mon.left, wnd.left);
+		const LONG iy0 = (std::max)(mon.top, wnd.top);
+		const LONG ix1 = (std::min)(mon.right, wnd.right);
+		const LONG iy1 = (std::min)(mon.bottom, wnd.bottom);
+
+		if (ix1 <= ix0 || iy1 <= iy0) continue;
+
+		// Convert to window-local pixels (ints), clamped to [0..W/H]
+		const int y0 = (std::max)(0, static_cast<int>(iy0 - wnd.top));
+		const int y1 = (std::min)(H, static_cast<int>(iy1 - wnd.top));
+		const int x0 = (std::max)(0, static_cast<int>(ix0 - wnd.left));
+		const int x1 = (std::min)(W, static_cast<int>(ix1 - wnd.left));
+
+		if (x1 <= x0) continue;
+
+		for (int y = y0; y < y1; ++y)
+			m_spans[y].push_back({ x0, x1 });
+	}
+
+	// Merge per-row spans (handles overlaps / touching monitors)
+	for (int y = 0; y < HEIGHT; ++y)
+		pf_merge_spans(m_spans[y]);
+}
+
+bool ParticleScreen::IsVisibleXY(int x, int y) const {
+	if (y < 0 || y >= (int)m_spans.size()) return false;
+	const auto& row = m_spans[y];
+	// Row usually has 1–2 spans; linear is fine. (Binary search if you prefer.)
+	for (const auto& s : row)
+		if (x >= s.x0 && x < s.x1) return true;
+	return false;
+}

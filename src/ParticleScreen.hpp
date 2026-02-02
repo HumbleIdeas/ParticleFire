@@ -28,6 +28,9 @@
 #include "Basis.h"
 #include "CStr.h"
 
+#include <vector>
+#include <algorithm>
+
 #define MAX_PART 10000
 
 class ParticleContainer;
@@ -62,6 +65,9 @@ public:
 	int DrawCenteredFont(const wchar_t *text, int lines=1, int lineNum=0, int col_r=255, int col_g=255, int col_b=255);
 	int DrawXYFont(const wchar_t *text, int x, int y, int col_r=255, int col_g=255, int col_b=255);
 
+	void RefreshMonitorRects();
+	void BuildVisibleSpans();                  // new for skipping non-screen areas
+	inline bool IsVisibleXY(int x, int y) const; // new for skipping non-screen areas
 public:
 	ParticleContainer *parent;
 
@@ -134,6 +140,9 @@ public:
 
 	int CycleColors;
 
+	std::vector<RECT> m_monRects;  // virtual-desktop coords
+	struct PF_Span { int x0, x1; }; // [x0, x1) half-open -  for skipping non-screen areas
+	std::vector<std::vector<PF_Span>> m_spans; // size = HEIGHT; merged spans per row - for skipping non-screen areas
 };
 
 #endif

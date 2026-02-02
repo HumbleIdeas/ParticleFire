@@ -118,6 +118,16 @@ static const DWORD ARM_DELAY_MS = 1111;  // ignore noise for first 1.111s
 static const int   MOVE_THRESH = 5;    // pixels required to count as real move
 //end - vars to be used for evading a random mouse move when the saver starts
 
+// Globals for supressing reaction to mousemoves on monitor changes (or pack into your screen class)
+static ULONGLONG g_suppressInputUntil = 0;
+
+static inline void PF_SuppressInputMs(DWORD ms) {
+	g_suppressInputUntil = GetTickCount64() + ms;
+}
+
+static inline bool PF_InputSuppressed() {
+	return GetTickCount64() < g_suppressInputUntil;
+}
 
 
 // For testing out stuff or gathering errors
@@ -138,34 +148,37 @@ LRESULT CALLBACK ScreenSaverProc(HWND hwnd, UINT iMsg, WPARAM wParam, LPARAM lPa
 	HDC hdc;
 //	int ret = -1;	//Do DefScrProc
 	switch(iMsg){
-		case WM_CREATE :
+	case WM_CREATE:
+	{
+		HWND parent = GetAncestor(hwnd, GA_PARENT);
+		partFire.screen.Preview =
+			(parent && (GetWindowLongPtr(hwnd, GWL_STYLE) & WS_CHILD)) ? 1 : 0;
 
+		s_startTick = GetTickCount64();
+		s_armed = false;
+		s_lastPt.x = LONG_MIN;
+		s_lastPt.y = LONG_MIN;
 
-			//setting up to ignore mouse moves right after start up
-			s_startTick = GetTickCount64();
-			s_armed = false;
-			s_lastPt.x = LONG_MIN;
-			s_lastPt.y = LONG_MIN;
-
-
+		partFire.screen.InitScreen(hwnd);
 
 			//
 #ifdef COUNTQUOTE
 			memset(QuoteCount, 0, sizeof(QuoteCount));
 #endif
-			//
-			partFire.registry.LoadOpts();
-			//
-		//	InitStuff(hwnd);
-		//	SetTimer(hwnd, 1, 50, NULL);
-			SetTimer(hwnd, 1, 40, NULL);
+		//
+		partFire.registry.LoadOpts();
+		//
+	//	InitStuff(hwnd);
+	//	SetTimer(hwnd, 1, 50, NULL);
+		SetTimer(hwnd, 1, 40, NULL);  // 1000/40 = ~25 FPS (Frames Per Second) 
 		//	PostMessage(hwnd, WM_INFINITE, 0, 0);
 			//
-			return 0;
+		return 0;
 		//	ret = 0;
 		//	break;
+	}
 		case WM_ACTIVATE :
-			return 0;
+			if (partFire.screen.Preview) return 0;
 			break;
 		case WM_INFINITE :
 		//	PostMessage(hwnd, WM_INFINITE, 0, 0);
@@ -269,6 +282,8 @@ LRESULT CALLBACK ScreenSaverProc(HWND hwnd, UINT iMsg, WPARAM wParam, LPARAM lPa
 #endif
 			if (partFire.screen.Preview) return 0;  // never dismiss from hover in preview
 
+			if (PF_InputSuppressed()) return 0; //ignore mousemoves on monitor changes
+
 			// Arm after a short delay to ignore activation jitter
 			if (!s_armed && GetTickCount64() - s_startTick >= ARM_DELAY_MS) s_armed = true;
 
@@ -285,7 +300,70 @@ LRESULT CALLBACK ScreenSaverProc(HWND hwnd, UINT iMsg, WPARAM wParam, LPARAM lPa
 			}
 			return 0; // swallow for now to see if jitter is the cause
 		}
+		//DPI awareness
+		case WM_DPICHANGED:
+		{
+			const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
 
+			if (!partFire.screen.Preview) {
+				// Top-level saver window: accept system’s proposed rect
+				SetWindowPos(hwnd, nullptr,
+					suggested->left, suggested->top,
+					suggested->right - suggested->left,
+					suggested->bottom - suggested->top,
+					SWP_NOZORDER | SWP_NOACTIVATE);
+
+				// Re-init only if size actually changed
+				RECT wr; GetWindowRect(hwnd, &wr);
+				const int newW = wr.right - wr.left;
+				const int newH = wr.bottom - wr.top;
+				if (newW != partFire.screen.WIDTH || newH != partFire.screen.HEIGHT) {
+					partFire.screen.InitScreen(hwnd);
+					//redundant as it's called at the end of InitScreen
+					// partFire.screen.RefreshMonitorRects();
+				}
+			}
+			else {
+				// Preview child: do NOT apply suggested rect; just refit buffers
+				RECT cr; GetClientRect(hwnd, &cr);
+				const int w = cr.right - cr.left, h = cr.bottom - cr.top;
+				if (w > 0 && h > 0 && (w != partFire.screen.WIDTH || h != partFire.screen.HEIGHT)) {
+					partFire.screen.InitScreen(hwnd); // or a light Resize(w,h)
+					// No monitor refresh needed; spans intersect the preview host anyway
+				}
+			}
+			return 0;
+		}
+		case WM_DISPLAYCHANGE:
+			if (!partFire.screen.Preview) {
+				//resize saver windows to physical pixels of virtual desktop
+				const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+				const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+				const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+				const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+				SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh,
+					SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+
+				partFire.screen.InitScreen(hwnd);
+				//redundant as it's called at the end of InitScreen
+				// partFire.screen.RefreshMonitorRects();
+
+				PF_SuppressInputMs(750); // ignore spurious WM_MOUSEMOVE etc for ~0.75s because the OS moves the mouse to center of main screen
+			}
+			//recompute backbuffer in case sizes changed
+			return 0;
+		case WM_SIZE:
+		{
+			if (partFire.screen.Preview && wParam != SIZE_MINIMIZED) {
+				const int w = LOWORD(lParam), h = HIWORD(lParam);
+				if (w > 0 && h > 0) {
+					partFire.screen.InitScreen(hwnd);  // Resize(w, h);      // light-weight reallocate DIB + font
+				}
+				return 0;  // don’t fall through to any full-screen sizing code
+			}
+			break;
+		}
 	}//Switch
 //	return DefWindowProc(hwnd, iMsg, wParam, lParam);
 	//
