@@ -1000,7 +1000,7 @@ void ParticleScreen::DrawParticles ()
 		dx = (int)parent->p[i].x - x;
 		dy = (int)parent->p[i].y - y;
 		//Make sure LAST coords are inside bounds too.
-		if(x >= XOFF && y >= YOFF && x < WIDTH - XOFF && y < HEIGHT - YOFF)
+		if(x >= XOFF && y >= YOFF && x < WIDTH - XOFF && y < HEIGHT - YOFF && IsVisibleXY(x, y))
 		{
 			//Bresenham style line drawer.
 			//X major.
